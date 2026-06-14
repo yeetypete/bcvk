@@ -131,13 +131,13 @@ pub enum MachineType {
 }
 
 impl MachineType {
-    /// Resolve to a QEMU `-machine` argument for the current host.
+    /// Resolve to a QEMU `-machine` argument for the given target architecture.
     ///
     /// Returns `None` for unknown architectures, letting QEMU use its default.
-    pub fn resolve(&self) -> Option<&str> {
+    pub fn resolve(&self, arch: &str) -> Option<&str> {
         // xref: https://github.com/coreos/coreos-assembler/blob/main/mantle/platform/qemu.go
         match self {
-            Self::Auto => match std::env::consts::ARCH {
+            Self::Auto => match arch {
                 "x86_64" => Some("q35"),
                 // gic-version=max selects the best available GIC for the host
                 "aarch64" => Some("virt,gic-version=max"),
@@ -229,6 +229,15 @@ pub struct QemuConfig {
 
     /// fw_cfg entries for passing config files to the guest
     fw_cfg_entries: Vec<(String, Utf8PathBuf)>,
+
+    /// Target guest architecture as a QEMU arch string (e.g. "x86_64",
+    /// "aarch64"). `None` uses the host architecture.
+    pub target_arch: Option<String>,
+
+    /// Whether to use KVM acceleration. `None` auto-selects: KVM when the
+    /// target matches the host and /dev/kvm is available, otherwise TCG
+    /// (full emulation, e.g. for cross-architecture guests).
+    pub use_kvm: Option<bool>,
 }
 
 impl QemuConfig {
@@ -505,8 +514,18 @@ fn allocate_vsock_cid(vhost_fd: File) -> Result<(OwnedFd, u32)> {
     Err(eyre!("Could not find available VSOCK CID (tried 3-10000)"))
 }
 
+/// Returns true if /dev/kvm exists and can be opened for read/write.
+fn kvm_available() -> bool {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/kvm")
+        .is_ok()
+}
+
 /// Spawn QEMU VM process with given configuration and optional extra credential.
-/// Uses KVM acceleration, memory-backend-memfd for VirtIO-FS compatibility.
+/// Uses KVM acceleration when the target matches the host and /dev/kvm is
+/// available, otherwise TCG emulation. Uses memory-backend-memfd for VirtIO-FS.
 fn spawn(
     config: &QemuConfig,
     extra_credentials: &[String],
@@ -520,18 +539,26 @@ fn spawn(
         config.memory_mb
     );
 
+    // Determine the target architecture and whether to use KVM. When the
+    // target matches the host and /dev/kvm is available we use native KVM;
+    // otherwise we fall back to TCG full emulation (e.g. cross-arch guests).
+    let host_arch = std::env::consts::ARCH;
+    let target_arch = config.target_arch.as_deref().unwrap_or(host_arch);
+    let use_kvm = config
+        .use_kvm
+        .unwrap_or_else(|| target_arch == host_arch && kvm_available());
+
     let qemu = std::env::var("QEMU_BIN")
         .ok()
         .map(Ok)
         .unwrap_or_else(|| -> Result<_> {
-            // RHEL only supports non-emulated, and qemu is an implementation detail
-            // of higher level virt.
+            // /usr/libexec/qemu-kvm is a RHEL-specific KVM build for the host
+            // architecture only; use it solely for native KVM runs.
             let libexec_qemu = Utf8Path::new("/usr/libexec/qemu-kvm");
-            if libexec_qemu.try_exists()? {
+            if use_kvm && target_arch == host_arch && libexec_qemu.try_exists()? {
                 Ok(libexec_qemu.to_string())
             } else {
-                let arch = std::env::consts::ARCH;
-                Ok(format!("qemu-system-{arch}"))
+                Ok(format!("qemu-system-{target_arch}"))
             }
         })
         .context("Checking for qemu")?;
@@ -546,19 +573,20 @@ fn spawn(
         });
     }
 
-    // Set machine type (auto-detected or explicit)
-    if let Some(machine) = config.machine_type.resolve() {
+    // Set machine type (auto-detected for the target arch, or explicit)
+    if let Some(machine) = config.machine_type.resolve(target_arch) {
         cmd.args(["-machine", machine]);
     }
 
+    cmd.args(["-m", &memory_arg, "-smp", &config.vcpus.to_string()]);
+    if use_kvm {
+        cmd.args(["-enable-kvm", "-cpu", "host"]);
+    } else {
+        // TCG full emulation: required for cross-arch guests or when KVM is
+        // unavailable. `-cpu max` exposes the broadest feature set.
+        cmd.args(["-accel", "tcg", "-cpu", "max"]);
+    }
     cmd.args([
-        "-m",
-        &memory_arg,
-        "-smp",
-        &config.vcpus.to_string(),
-        "-enable-kvm",
-        "-cpu",
-        "host",
         "-audio",
         "none",
         "-object",
@@ -1030,6 +1058,20 @@ mod tests {
     fn test_disk_format() {
         assert_eq!(DiskFormat::Raw.as_str(), "raw");
         assert_eq!(DiskFormat::Qcow2.as_str(), "qcow2");
+    }
+
+    #[test]
+    fn test_machine_type_resolve_per_arch() {
+        // Auto resolves the machine type from the target arch, not the host.
+        assert_eq!(MachineType::Auto.resolve("x86_64"), Some("q35"));
+        assert_eq!(
+            MachineType::Auto.resolve("aarch64"),
+            Some("virt,gic-version=max")
+        );
+        assert_eq!(MachineType::Auto.resolve("riscv64"), None);
+        // Explicit is returned verbatim regardless of arch.
+        let m = MachineType::Explicit("virt".to_string());
+        assert_eq!(m.resolve("x86_64"), Some("virt"));
     }
 
     #[test]

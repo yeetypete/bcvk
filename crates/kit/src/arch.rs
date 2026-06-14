@@ -87,10 +87,26 @@ pub fn is_x86_64() -> bool {
     std::env::consts::ARCH == "x86_64"
 }
 
-/// Check if running on ARM64/AArch64 architecture  
+/// Check if running on ARM64/AArch64 architecture
 #[allow(dead_code)]
 pub fn is_aarch64() -> bool {
     std::env::consts::ARCH == "aarch64"
+}
+
+/// Normalize an architecture name to the QEMU spelling used by
+/// `qemu-system-<arch>` and `std::env::consts::ARCH`.
+///
+/// Accepts both OCI/Go names (`amd64`, `arm64`) and QEMU/Rust names
+/// (`x86_64`, `aarch64`). Unknown values are returned unchanged.
+pub fn qemu_arch(input: &str) -> String {
+    match input {
+        "amd64" | "x86_64" => "x86_64",
+        "arm64" | "aarch64" => "aarch64",
+        "ppc64le" | "powerpc64le" | "powerpc64" => "powerpc64",
+        "s390x" => "s390x",
+        other => other,
+    }
+    .to_string()
 }
 
 #[cfg(test)]
@@ -146,5 +162,17 @@ mod tests {
 
         // Should be mutually exclusive
         assert!(!(is_x86_64() && is_aarch64()));
+    }
+
+    #[test]
+    fn test_qemu_arch() {
+        // OCI/Go names normalize to QEMU spelling
+        assert_eq!(qemu_arch("amd64"), "x86_64");
+        assert_eq!(qemu_arch("arm64"), "aarch64");
+        // QEMU/Rust names pass through
+        assert_eq!(qemu_arch("x86_64"), "x86_64");
+        assert_eq!(qemu_arch("aarch64"), "aarch64");
+        // Unknown values are returned unchanged
+        assert_eq!(qemu_arch("riscv64"), "riscv64");
     }
 }

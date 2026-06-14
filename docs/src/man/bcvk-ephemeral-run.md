@@ -30,6 +30,16 @@ This architecture provides several advantages:
 - **Fast I/O**: virtiofs provides efficient filesystem access between container and VM
 - **Resource Efficiency**: Leverages existing container infrastructure while providing full VM capabilities
 
+## Architecture and acceleration
+
+By default the guest architecture is taken from the container image, and
+`--arch` can override it. When the target architecture matches the host and
+`/dev/kvm` is available, the VM uses KVM acceleration. Otherwise (a
+cross-architecture guest, or no KVM) it falls back to QEMU TCG full
+emulation, which is correct but significantly slower. For cross-arch runs the
+host does not pass `/dev/kvm` into the container. The matching
+`qemu-system-<arch>` emulator must be installed.
+
 ## Container-VM Relationship
 
 The relationship between the podman container and the VM inside it:
@@ -83,6 +93,10 @@ This design allows bcvk to provide VM-like isolation and boot behavior while lev
 **-K**, **--ssh-keygen**
 
     Generate SSH keypair and inject via systemd credentials
+
+**--virtiofsd**=*VIRTIOFSD_BINARY*
+
+    Path to virtiofsd binary (overrides auto-detection)
 
 **-t**, **--tty**
 
@@ -151,6 +165,10 @@ This design allows bcvk to provide VM-like isolation and boot behavior while lev
 **--ignition**=*IGNITION_CONFIG*
 
     Path to Ignition config file (JSON format) to inject via fw_cfg
+
+**--arch**=*ARCH*
+
+    Target CPU architecture for the guest. Accepts QEMU names ("aarch64", "x86_64") or OCI names ("arm64", "amd64"). Defaults to the image's architecture. Cross-architecture guests run under TCG emulation (no KVM), which is correct but slow
 
 <!-- END GENERATED OPTIONS -->
 

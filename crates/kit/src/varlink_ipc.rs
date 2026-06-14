@@ -277,6 +277,8 @@ impl BcvkService {
                 kernel_args: opts.kargs.unwrap_or_default(),
                 ignition_config: None,
                 host_dns_servers: None,
+                arch: None,
+                resolved_arch: None,
             };
 
             crate::run_ephemeral::run_detached(run_opts)

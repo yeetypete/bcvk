@@ -314,6 +314,19 @@ pub struct RunEphemeralOpts {
     #[clap(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host_dns_servers: Option<Vec<String>>,
+
+    /// Target CPU architecture for the guest. Accepts QEMU names
+    /// ("aarch64", "x86_64") or OCI names ("arm64", "amd64"). Defaults to
+    /// the image's architecture. Cross-architecture guests run under TCG
+    /// emulation (no KVM), which is correct but slow.
+    #[clap(long = "arch")]
+    pub arch: Option<String>,
+
+    /// Resolved QEMU target architecture, computed on the host and
+    /// propagated to the in-container phase. Not a CLI option.
+    #[clap(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_arch: Option<String>,
 }
 
 /// Parse DNS servers from resolv.conf format content
@@ -434,6 +447,27 @@ fn prepare_run_command_with_temp(
     opts: RunEphemeralOpts,
 ) -> Result<(std::process::Command, tempfile::TempDir)> {
     debug!("Running QEMU inside hybrid container for {}", opts.image);
+
+    // Resolve the target guest architecture: explicit --arch override, else
+    // the image's architecture. Cross-arch guests (target != host) run under
+    // TCG, so /dev/kvm is only passed through for native runs.
+    let host_arch = std::env::consts::ARCH;
+    let target_arch = match opts.arch.as_deref() {
+        Some(a) => crate::arch::qemu_arch(a),
+        None => crate::arch::qemu_arch(&crate::podman::get_image_arch(&opts.image)?),
+    };
+    let use_kvm = target_arch == host_arch && Utf8Path::new("/dev/kvm").exists();
+    if target_arch != host_arch {
+        debug!("Cross-arch guest ({target_arch} on {host_arch}); using TCG emulation");
+        // The target image's bwrap would run under qemu-user emulation, where
+        // unshare() of new namespaces fails. The entrypoint instead bootstraps
+        // via the host's bwrap (from the bind-mounted /usr), so it must exist.
+        if !Utf8Path::new("/usr/bin/bwrap").exists() {
+            return Err(eyre!(
+                "Cross-architecture ephemeral run requires bwrap (bubblewrap) installed on the host"
+            ));
+        }
+    }
 
     // Check Ignition support early (before launching container) if --ignition is specified
     if opts.ignition_config.is_some() {
@@ -581,8 +615,12 @@ fn prepare_run_command_with_temp(
         // Ensure we can create large files on the host and not in the overlay
         "-v",
         "/var/tmp:/var/tmp",
-        "--device=/dev/kvm",
     ]);
+    // Only pass through /dev/kvm for native (same-arch) runs; cross-arch
+    // guests use TCG emulation and must not require KVM.
+    if use_kvm {
+        cmd.arg("--device=/dev/kvm");
+    }
     cmd.args(vhost_dev);
     cmd.args([
         "-v",
@@ -670,8 +708,15 @@ fn prepare_run_command_with_temp(
     // Include host DNS servers in the config so they're available inside the container
     let mut opts_with_dns = opts.clone();
     opts_with_dns.host_dns_servers = host_dns_servers;
+    opts_with_dns.resolved_arch = Some(target_arch.clone());
     let config = serde_json::to_string(&opts_with_dns).unwrap();
     cmd.args(["-e", &format!("BCK_CONFIG={config}")]);
+    if target_arch != host_arch {
+        // Tell the entrypoint to bootstrap with the host bwrap (run via the
+        // host dynamic linker from the bind-mounted /usr) rather than the
+        // target image's emulated bwrap, whose unshare() fails under qemu-user.
+        cmd.args(["-e", "BCVK_CROSS_ARCH=1"]);
+    }
 
     // Handle --execute output files and virtio-serial devices
     let mut all_serial_devices = opts.common.virtio_serial_out.clone();
@@ -1001,9 +1046,23 @@ pub(crate) async fn run_impl(opts: RunEphemeralOpts) -> Result<()> {
     };
     tracing::debug!("Target image has cloud-init: {cloudinit}");
 
-    // Verify KVM access
-    if !Utf8Path::new("/dev/kvm").exists() || !fs::File::open("/dev/kvm").is_ok() {
-        return Err(eyre!("KVM device not accessible"));
+    // Decide acceleration. Native (same-arch) runs use KVM when /dev/kvm is
+    // available; cross-arch guests use TCG emulation. The host only passes
+    // /dev/kvm through for native runs, so for cross-arch it is absent here.
+    let host_arch = std::env::consts::ARCH;
+    let target_arch = opts
+        .resolved_arch
+        .clone()
+        .unwrap_or_else(|| host_arch.to_string());
+    let use_kvm = target_arch == host_arch
+        && Utf8Path::new("/dev/kvm").exists()
+        && fs::File::open("/dev/kvm").is_ok();
+    if target_arch != host_arch {
+        debug!("Emulating {target_arch} guest on {host_arch} host via TCG (slow)");
+    } else if use_kvm {
+        debug!("Using KVM acceleration");
+    } else {
+        tracing::warn!("/dev/kvm not accessible; falling back to TCG emulation (slow)");
     }
 
     // Create QEMU mount points
@@ -1349,6 +1408,8 @@ StandardOutput=file:/dev/virtio-ports/executestatus
         "/run/qemu/initramfs".to_string(),
         main_virtiofsd_config.socket_path.clone(),
     );
+    qemu_config.target_arch = Some(target_arch.clone());
+    qemu_config.use_kvm = Some(use_kvm);
 
     // Check for BCVK_DEBUG=disable-vsock to force disabling vsock for testing
     let vsock_force_disabled = std::env::var("BCVK_DEBUG").as_deref() == Ok("disable-vsock");

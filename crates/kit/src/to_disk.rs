@@ -560,6 +560,8 @@ pub fn run(mut opts: ToDiskOpts) -> Result<RunOutcome> {
         kernel_args: Default::default(),
         ignition_config: None,
         debug_entrypoint: None,
+        arch: None,
+        resolved_arch: None,
     };
 
     // Phase 5: SSH-based VM configuration and execution

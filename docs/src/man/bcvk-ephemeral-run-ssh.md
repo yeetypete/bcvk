@@ -82,6 +82,10 @@ For longer-running VMs where you need to reconnect multiple times, use
 
     Generate SSH keypair and inject via systemd credentials
 
+**--virtiofsd**=*VIRTIOFSD_BINARY*
+
+    Path to virtiofsd binary (overrides auto-detection)
+
 **-t**, **--tty**
 
     Allocate a pseudo-TTY for container
@@ -149,6 +153,10 @@ For longer-running VMs where you need to reconnect multiple times, use
 **--ignition**=*IGNITION_CONFIG*
 
     Path to Ignition config file (JSON format) to inject via fw_cfg
+
+**--arch**=*ARCH*
+
+    Target CPU architecture for the guest. Accepts QEMU names ("aarch64", "x86_64") or OCI names ("arm64", "amd64"). Defaults to the image's architecture. Cross-architecture guests run under TCG emulation (no KVM), which is correct but slow
 
 <!-- END GENERATED OPTIONS -->
 

@@ -22,6 +22,8 @@ pub struct PodmanSystemInfo {
 #[serde(rename_all = "PascalCase")]
 pub struct ImageInspect {
     pub size: u64,
+    /// OCI architecture of the image (e.g. "amd64", "arm64").
+    pub architecture: String,
 }
 
 pub fn get_system_info() -> Result<PodmanSystemInfo> {
@@ -49,4 +51,22 @@ pub fn get_image_size(image: &str) -> Result<u64> {
     }
 
     Ok(inspect_result[0].size)
+}
+
+/// Get the OCI architecture of a container image (e.g. "amd64", "arm64").
+pub fn get_image_arch(image: &str) -> Result<String> {
+    let inspect_result: Vec<ImageInspect> = Command::new("podman")
+        .arg("inspect")
+        .arg("--format=json")
+        .arg("--type=image")
+        .arg("--")
+        .arg(image)
+        .run_and_parse_json()
+        .map_err(|e| eyre!("podman inspect failed for image {}: {}", image, e))?;
+
+    inspect_result
+        .into_iter()
+        .next()
+        .map(|i| i.architecture)
+        .ok_or_else(|| eyre!("No image found for: {}", image))
 }
